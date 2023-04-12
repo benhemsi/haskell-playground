@@ -23,6 +23,7 @@ dependencies:
 - hspec
 - stm
 - containers
+- validation
 
 ghc-options:
 - -Wall
