@@ -20,6 +20,12 @@ newtype Server =
     { clients :: TVar (Map.Map ClientName Client)
     }
 
+newServer :: IO Server
+newServer =
+  atomically $ do
+    emptyClients <- newTVar Map.empty
+    return $ Server emptyClients
+
 addClient :: Server -> ClientName -> Int -> IO ()
 addClient server newClient initialBalance =
   runSTM $ addClientSTM server newClient initialBalance
@@ -32,7 +38,7 @@ addClientSTM server newClient initialBalance = do
     then return $ Failure (ClientAlreadyExists newClient)
     else do
       modifyTVar (clients server) (Map.insert newClient (Client newBalance))
-      return $ Success "Successful addition"
+      return $ Success $ newClient ++ " successfully added"
 
 removeClient :: Server -> ClientName -> IO ()
 removeClient server newClient = runSTM $ removeClientSTM server newClient
@@ -44,7 +50,7 @@ removeClientSTM server clientToRemove = do
     then return $ Failure (ClientDoesNotExist clientToRemove)
     else do
       modifyTVar (clients server) (Map.delete clientToRemove)
-      return $ Success "Successful deletion"
+      return $ Success $ clientToRemove ++ " successfully deleted"
 
 transfer :: Server -> ClientName -> ClientName -> Int -> IO ()
 transfer server startClient endClient amount =
@@ -55,7 +61,10 @@ transferSTM server startClient endClient amount = do
   validatedDeposit <- depositSTM server endClient amount
   validatedWithdraw <- withdrawSTM server startClient amount
   return $
-    Success "Sucessful transaction." <* validatedDeposit <* validatedWithdraw
+    Success
+      ("Successful transaction from " ++ startClient ++ " to " ++ endClient) <*
+    validatedDeposit <*
+    validatedWithdraw
 
 deposit :: Server -> ClientName -> Int -> IO ()
 deposit server client amount = runSTM $ depositSTM server client amount
@@ -67,7 +76,7 @@ depositSTM server client amount = do
     Nothing -> return (Failure (ClientDoesNotExist client))
     Just clientToUpdate -> do
       modifyTVar (balance clientToUpdate) (+ amount)
-      return $ Success "Successful deposit."
+      return $ Success "Successful deposit"
 
 withdraw :: Server -> ClientName -> Int -> IO ()
 withdraw server client amount = runSTM $ withdrawSTM server client amount
@@ -83,10 +92,20 @@ withdrawSTM server client amount = do
         then return $ Failure (InsufficientFunds client amount)
         else do
           modifyTVar (balance clientToUpdate) (amount -)
-          return $ Success "Successful withdraw."
+          return $ Success "Successful withdraw"
 
 showBalance :: Server -> ClientName -> IO ()
-showBalance = undefined
+showBalance server client = runSTM $ showBalanceSTM server client
+
+showBalanceSTM :: Server -> ClientName -> STMReturnType
+showBalanceSTM server client = do
+  currentClients <- readTVar (clients server)
+  case Map.lookup client currentClients of
+    Nothing -> return (Failure (ClientDoesNotExist client))
+    Just clientToUpdate -> do
+      currentBalance <- readTVar (balance clientToUpdate)
+      return $
+        Success $ "Client " ++ client ++ " has balance " ++ show currentBalance
 
 runSTM :: STMReturnType -> IO ()
 runSTM stm = do
