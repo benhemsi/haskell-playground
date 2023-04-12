@@ -30,7 +30,7 @@ addClient :: Server -> ClientName -> Int -> IO ()
 addClient server newClient initialBalance =
   runSTM $ addClientSTM server newClient initialBalance
 
-addClientSTM :: Server -> ClientName -> Int -> STMReturnType
+addClientSTM :: Server -> ClientName -> Int -> STMReturnType String
 addClientSTM server newClient initialBalance = do
   newBalance <- newTVar initialBalance
   currentClients <- readTVar (clients server)
@@ -43,7 +43,7 @@ addClientSTM server newClient initialBalance = do
 removeClient :: Server -> ClientName -> IO ()
 removeClient server newClient = runSTM $ removeClientSTM server newClient
 
-removeClientSTM :: Server -> ClientName -> STMReturnType
+removeClientSTM :: Server -> ClientName -> STMReturnType String
 removeClientSTM server clientToRemove = do
   currentClients <- readTVar (clients server)
   if Map.notMember clientToRemove currentClients
@@ -54,19 +54,16 @@ removeClientSTM server clientToRemove = do
 
 payDebt :: Server -> ClientName -> ClientName -> Int -> IO ()
 payDebt server startClient endClient amount = do
-  validatedBalance <- atomically $ showBalanceSTM server startClient
-  case validatedBalance of
+  maybeRemainder <-
+    atomically $ transferReturningRemainder server startClient endClient amount
+  case maybeRemainder of
     Failure errorMessage -> print errorMessage
-    Success currentBalance ->
-      if currentBalance >= amount
-        then transferWithError server startClient endClient amount
-        else do
-          transferWithError server startClient endClient currentBalance
-          transferWithRetry
-            server
-            startClient
-            endClient
-            (amount - currentBalance)
+    Success Nothing -> putStrLn "Successful transaction"
+    Success (Just remainder) -> do
+      putStrLn
+        ("Insufficient funds to make complete transfer. The account has been emptied and the remaining balance " ++
+         show remainder ++ " will be taken where there are sufficient funds")
+      transferWithRetry server startClient endClient remainder
 
 transferWithError :: Server -> ClientName -> ClientName -> Int -> IO ()
 transferWithError server startClient endClient amount =
@@ -76,13 +73,29 @@ transferWithRetry :: Server -> ClientName -> ClientName -> Int -> IO ()
 transferWithRetry server startClient endClient amount =
   runSTM $ transferSTM True server startClient endClient amount
 
+transferReturningRemainder ::
+     Server -> ClientName -> ClientName -> Int -> STMReturnType (Maybe Int)
+transferReturningRemainder server startClient endClient amount = do
+  depositSTM server endClient amount
+  validatedBalance <- showBalanceSTM server startClient
+  case validatedBalance of
+    Failure errorMessage -> return $ Failure errorMessage
+    Success currentBalance ->
+      if currentBalance >= amount
+        then do
+          transferSTM False server startClient endClient amount
+          return $ Success Nothing
+        else do
+          transferSTM False server startClient endClient currentBalance
+          return $ Success (Just (amount - currentBalance))
+
 transferSTM ::
      Bool -- retry transaction
   -> Server
   -> ClientName
   -> ClientName
   -> Int
-  -> STMReturnType
+  -> STMReturnType String
 transferSTM retryIfInsufficientFunds server startClient endClient amount = do
   validatedDeposit <- depositSTM server endClient amount
   validatedWithdraw <-
@@ -96,7 +109,7 @@ transferSTM retryIfInsufficientFunds server startClient endClient amount = do
 deposit :: Server -> ClientName -> Int -> IO ()
 deposit server client amount = runSTM $ depositSTM server client amount
 
-depositSTM :: Server -> ClientName -> Int -> STMReturnType
+depositSTM :: Server -> ClientName -> Int -> STMReturnType String
 depositSTM server client amount = do
   currentClients <- readTVar (clients server)
   case Map.lookup client currentClients of
@@ -108,10 +121,10 @@ depositSTM server client amount = do
 withdraw :: Server -> ClientName -> Int -> IO ()
 withdraw server client amount = runSTM $ withdrawWithError server client amount
 
-withdrawWithError :: Server -> ClientName -> Int -> STMReturnType
+withdrawWithError :: Server -> ClientName -> Int -> STMReturnType String
 withdrawWithError = withdrawSTM False
 
-withdrawWithRetry :: Server -> ClientName -> Int -> STMReturnType
+withdrawWithRetry :: Server -> ClientName -> Int -> STMReturnType String
 withdrawWithRetry = withdrawSTM True
 
 withdrawSTM ::
@@ -119,7 +132,7 @@ withdrawSTM ::
   -> Server
   -> ClientName
   -> Int
-  -> STMReturnType
+  -> STMReturnType String
 withdrawSTM retryIfInsufficientFunds server client amount = do
   currentClients <- readTVar (clients server)
   case Map.lookup client currentClients of
@@ -139,7 +152,7 @@ showBalance server client = do
   currentBalance <- atomically $ showBalanceSTM server client
   putStrLn $ "Current balance is " ++ show currentBalance
 
-showBalanceSTM :: Server -> ClientName -> STM (Validation TransactionError Int)
+showBalanceSTM :: Server -> ClientName -> STMReturnType Int
 showBalanceSTM server client = do
   currentClients <- readTVar (clients server)
   case Map.lookup client currentClients of
@@ -148,14 +161,14 @@ showBalanceSTM server client = do
       currentBalance <- readTVar (balance clientToUpdate)
       return $ Success currentBalance
 
-runSTM :: STMReturnType -> IO ()
+runSTM :: Show a => STMReturnType a -> IO ()
 runSTM stm = do
   errorOrSuccess <- atomically stm
   case errorOrSuccess of
-    Success successMessage -> putStrLn successMessage
+    Success successMessage -> print successMessage
     Failure txnError -> print txnError
 
-type STMReturnType = STM (Validation TransactionError String)
+type STMReturnType a = STM (Validation TransactionError a)
 
 data TransactionError
   = ClientDoesNotExist ClientName
