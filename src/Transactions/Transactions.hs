@@ -1,12 +1,47 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Transactions.Transactions where
 
+import Control.Concurrent
 import Control.Concurrent.STM
+import Control.Monad
+import qualified Data.ByteString as S
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map as Map
 import Data.Validation
+import Network.Socket
+import Network.Socket.ByteString
+import Text.Printf
 
 transactionsMain :: IO ()
-transactionsMain = putStrLn "hello"
+transactionsMain =
+  withSocketsDo $ do
+    server <- newServer
+    let socketAddr = SockAddrInet port 0
+        socketAddrInfo =
+          defaultHints
+            { addrFamily = AF_INET
+            , addrSocketType = Datagram
+            , addrAddress = socketAddr
+            }
+    sock <-
+      socket
+        (addrFamily socketAddrInfo)
+        (addrSocketType socketAddrInfo)
+        (addrProtocol socketAddrInfo)
+    _ <- bind sock socketAddr
+    _ <- listen sock 44444
+    -- printf "Listening on port %d\n" 1024
+    forever $ do
+      (acceptedSock, SockAddrInet acceptedPort acceptedHost) <- accept sock
+      printf
+        "Accepted connection from %s: %s\n"
+        (show acceptedHost)
+        (show acceptedPort)
+      forkFinally (talk acceptedSock server) (\_ -> close acceptedSock)
+
+port :: PortNumber
+port = 44444
 
 type ClientName = String
 
@@ -19,6 +54,12 @@ newtype Server =
   Server
     { clients :: TVar (Map.Map ClientName Client)
     }
+
+talk :: Socket -> Server -> IO ()
+talk sock server = do
+  _ <- send sock "What is your name?"
+  receivedName <- recv sock 2048
+  unless (S.null receivedName) (addClient server (show receivedName) 100)
 
 newServer :: IO Server
 newServer =
@@ -76,17 +117,17 @@ transferWithRetry server startClient endClient amount =
 transferReturningRemainder ::
      Server -> ClientName -> ClientName -> Int -> STMReturnType (Maybe Int)
 transferReturningRemainder server startClient endClient amount = do
-  depositSTM server endClient amount
+  _ <- depositSTM server endClient amount
   validatedBalance <- showBalanceSTM server startClient
   case validatedBalance of
     Failure errorMessage -> return $ Failure errorMessage
     Success currentBalance ->
       if currentBalance >= amount
         then do
-          transferSTM False server startClient endClient amount
+          _ <- transferSTM False server startClient endClient amount
           return $ Success Nothing
         else do
-          transferSTM False server startClient endClient currentBalance
+          _ <- transferSTM False server startClient endClient currentBalance
           return $ Success (Just (amount - currentBalance))
 
 transferSTM ::
