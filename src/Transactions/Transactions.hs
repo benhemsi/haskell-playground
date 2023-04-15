@@ -36,14 +36,27 @@ talk :: Handle -> Server -> IO ()
 talk handle server = do
   hSetNewlineMode handle universalNewlineMode
   hSetBuffering handle LineBuffering
-  readName
+  name <- readName
+  takeRequest name
   where
     readName = do
       hPutStrLn handle "What is your name?"
       name <- hGetLine handle
       if null name
         then readName
-        else addClient handle server name 100
+        else do
+          addClient handle server name 100
+          return name
+    takeRequest clientName = do
+      hPutStrLn handle "Select 'transfer' or 'showBalance'"
+      action <- hGetLine handle
+      if action == "transfer"
+        then do
+          transferWithError handle server clientName
+          takeRequest clientName
+        else do
+          hPutStrLn handle $ action ++ " is invalid. Choose again"
+          takeRequest clientName
 
 newServer :: IO Server
 newServer =
@@ -92,9 +105,13 @@ payDebt handle server startClient endClient amount = do
          show remainder ++ " will be taken where there are sufficient funds")
       transferWithRetry handle server startClient endClient remainder
 
-transferWithError ::
-     Handle -> Server -> ClientName -> ClientName -> Int -> IO ()
-transferWithError handle server startClient endClient amount =
+transferWithError :: Handle -> Server -> ClientName -> IO ()
+transferWithError handle server startClient = do
+  hPutStrLn handle "Who would you like to transfer with?"
+  endClient <- hGetLine handle
+  hPutStrLn handle "How much would you like to send?"
+  amountStr <- hGetLine handle
+  let amount = read amountStr :: Int
   runSTM handle $ transferSTM False server startClient endClient amount
 
 transferWithRetry ::
