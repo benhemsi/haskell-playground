@@ -54,9 +54,13 @@ talk handle server = do
         then do
           transferWithError handle server clientName
           takeRequest clientName
-        else do
-          hPutStrLn handle $ action ++ " is invalid. Choose again"
-          takeRequest clientName
+        else if action == "showBalance"
+               then do
+                 showBalance handle server clientName
+                 takeRequest clientName
+               else do
+                 hPutStrLn handle $ action ++ " is invalid. Choose again"
+                 takeRequest clientName
 
 newServer :: IO Server
 newServer =
@@ -192,13 +196,16 @@ withdrawSTM retryIfInsufficientFunds server client amount = do
                then retry
                else return $ Failure (InsufficientFunds client amount)
         else do
-          modifyTVar (balance clientToUpdate) (amount -)
+          modifyTVar (balance clientToUpdate) (\current -> current - amount)
           return $ Success "Successful withdraw"
 
-showBalance :: Server -> ClientName -> IO ()
-showBalance server client = do
+showBalance :: Handle -> Server -> ClientName -> IO ()
+showBalance handle server client = do
   currentBalance <- atomically $ showBalanceSTM server client
-  putStrLn $ "Current balance is " ++ show currentBalance
+  case currentBalance of
+    Failure txnError -> hPrint handle txnError
+    Success accountBalance ->
+      hPutStrLn handle $ "Current balance is " ++ show accountBalance
 
 showBalanceSTM :: Server -> ClientName -> STMReturnType Int
 showBalanceSTM server client = do
