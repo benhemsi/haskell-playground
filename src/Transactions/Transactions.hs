@@ -146,6 +146,24 @@ logIn handle server = do
           hPutStrLn handle "Incorrect passord. Try again"
           enterPassword client
 
+getAmount :: Handle -> IO Int
+getAmount handle = do
+  enterAmount
+  where
+    enterAmount = do
+      amountStr <- hGetLine handle
+      let maybeAmount = readMaybe amountStr :: Maybe Int
+      case maybeAmount of
+        Just amount ->
+          if amount > 0
+            then return amount
+            else do
+              hPutStrLn handle "Balance must be greater than zero. Try again"
+              enterAmount
+        Nothing -> do
+          hPutStrLn handle "Invalid number. Try again"
+          enterAmount
+
 getClient :: Handle -> Server -> IO Client
 getClient handle server = do
   hPutStrLn handle "Enter username:"
@@ -196,24 +214,24 @@ removeClientSTM server clientToRemove = do
 transferWithError :: Handle -> Server -> Client -> IO ()
 transferWithError handle server startClient = do
   hPutStrLn handle "Who would you like to transfer with?"
-  endClient <- hGetLine handle
+  endClient <- getClient handle server
   hPutStrLn handle "How much would you like to send?"
   amountStr <- hGetLine handle
   let amount = read amountStr :: Int
   runSTM
     handle
-    (transferSTM False server (name startClient) endClient amount)
+    (transferSTM False startClient endClient amount)
     (\_ ->
-       "Successful transaction from " ++ name startClient ++ " to " ++ endClient)
+       "Successful transaction from " ++
+       name startClient ++ " to " ++ name endClient)
 
-transferWithRetry ::
-     Handle -> Server -> ClientName -> ClientName -> Int -> IO ()
-transferWithRetry handle server startClient endClient amount =
-  runSTM
-    handle
-    (transferSTM True server startClient endClient amount)
-    (\_ -> "Successful transaction from " ++ startClient ++ " to " ++ endClient)
-
+-- transferWithRetry ::
+--      Handle -> ClientName -> ClientName -> Int -> IO ()
+-- transferWithRetry handle startClient endClient amount =
+--   runSTM
+--     handle
+--     (transferSTM True startClient endClient amount)
+--     (\_ -> "Successful transaction from " ++ startClient ++ " to " ++ endClient)
 -- transferReturningRemainder ::
 --      Server -> ClientName -> ClientName -> Int -> STMReturnType (Maybe Int)
 -- transferReturningRemainder server startClient endClient amount = do
@@ -231,67 +249,51 @@ transferWithRetry handle server startClient endClient amount =
 --           return $ Success (Just (amount - currentBalance))
 transferSTM ::
      Bool -- retry transaction
-  -> Server
-  -> ClientName
-  -> ClientName
+  -> Client
+  -> Client
   -> Int
   -> STMReturnType ()
-transferSTM retryIfInsufficientFunds server startClient endClient amount = do
-  validatedDeposit <- depositSTM server endClient amount
-  validatedWithdraw <-
-    withdrawSTM retryIfInsufficientFunds server startClient amount
-  return $ Success () <* validatedDeposit <* validatedWithdraw
+transferSTM retryIfInsufficientFunds startClient endClient amount = do
+  _ <- depositSTM endClient amount
+  withdrawSTM retryIfInsufficientFunds startClient amount
 
-deposit :: Handle -> Server -> ClientName -> Int -> IO ()
-deposit handle server client amount =
-  runSTM handle (depositSTM server client amount) (const "Successful deposit")
+deposit :: Handle -> Client -> Int -> IO ()
+deposit handle client amount = do
+  _ <- atomically $ depositSTM client amount
+  hPutStrLn handle $ "Successful deposit of " ++ show amount
 
-depositSTM :: Server -> ClientName -> Int -> STMReturnType String
-depositSTM server client amount = do
-  currentClients <- readTVar (clients server)
-  case Map.lookup client currentClients of
-    Nothing -> return (Failure (ClientDoesNotExist client))
-    Just clientToUpdate -> do
-      modifyTVar (balance clientToUpdate) (+ amount)
-      return $ Success "Successful deposit"
+depositSTM :: Client -> Int -> STM ()
+depositSTM client amount = modifyTVar (balance client) (+ amount)
 
-withdraw :: Handle -> Server -> ClientName -> Int -> IO ()
-withdraw handle server client amount =
-  runSTM
-    handle
-    (withdrawWithError server client amount)
-    (const "Successful withdraw")
+withdraw :: Handle -> Client -> Int -> IO ()
+withdraw handle client amount =
+  runSTM handle (withdrawWithError client amount) (const "Successful withdraw")
 
-withdrawWithError :: Server -> ClientName -> Int -> STMReturnType String
+withdrawWithError :: Client -> Int -> STMReturnType ()
 withdrawWithError = withdrawSTM False
 
-withdrawWithRetry :: Server -> ClientName -> Int -> STMReturnType String
+withdrawWithRetry :: Client -> Int -> STMReturnType ()
 withdrawWithRetry = withdrawSTM True
 
 withdrawSTM ::
      Bool -- retries if true, throws an error if false
-  -> Server
-  -> ClientName
+  -> Client
   -> Int
-  -> STMReturnType String
-withdrawSTM retryIfInsufficientFunds server client amount = do
-  currentClients <- readTVar (clients server)
-  case Map.lookup client currentClients of
-    Nothing -> return (Failure (ClientDoesNotExist client))
-    Just clientToUpdate -> do
-      currentBalance <- readTVar (balance clientToUpdate)
-      if currentBalance < amount
-        then if retryIfInsufficientFunds
-               then retry
-               else return $ Failure (InsufficientFunds client amount)
-        else do
-          modifyTVar (balance clientToUpdate) (\current -> current - amount)
-          return $ Success "Successful withdraw"
+  -> STMReturnType ()
+withdrawSTM retryIfInsufficientFunds client amount = do
+  currentBalance <- readTVar (balance client)
+  if currentBalance < amount
+    then if retryIfInsufficientFunds
+           then retry
+           else return $ Failure (InsufficientFunds (name client) amount)
+    else do
+      modifyTVar (balance client) (\current -> current - amount)
+      return $ Success ()
 
 showBalance :: Handle -> Client -> IO ()
 showBalance handle client = do
   bal <- readTVarIO (balance client)
-  hPutStr handle $ "Current balance is " ++ show bal
+  hPutStr handle $ "Current balance is " ++ show bal ++ "\n"
 
 runSTM :: Handle -> STMReturnType a -> (a -> String) -> IO ()
 runSTM handle stm logMessage = do
