@@ -2,43 +2,20 @@
 
 module Transactions.Transactions where
 
-import Control.Concurrent
 import Control.Concurrent.STM
-import Control.Monad
-import qualified Data.ByteString as S
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map as Map
 import Data.Validation
+import Network.Run.TCP
 import Network.Socket
-import Network.Socket.ByteString
-import Text.Printf
+import System.IO
 
 transactionsMain :: IO ()
-transactionsMain =
-  withSocketsDo $ do
-    server <- newServer
-    let socketAddr = SockAddrInet port 0
-        socketAddrInfo =
-          defaultHints
-            { addrFamily = AF_INET
-            , addrSocketType = Datagram
-            , addrAddress = socketAddr
-            }
-    sock <-
-      socket
-        (addrFamily socketAddrInfo)
-        (addrSocketType socketAddrInfo)
-        (addrProtocol socketAddrInfo)
-    _ <- bind sock socketAddr
-    _ <- listen sock 44444
-    -- printf "Listening on port %d\n" 1024
-    forever $ do
-      (acceptedSock, SockAddrInet acceptedPort acceptedHost) <- accept sock
-      printf
-        "Accepted connection from %s: %s\n"
-        (show acceptedHost)
-        (show acceptedPort)
-      forkFinally (talk acceptedSock server) (\_ -> close acceptedSock)
+transactionsMain = do
+  server <- newServer
+  runTCPServer (Just "localhost") (show port) $ \sock -> do
+    handle <- socketToHandle sock ReadWriteMode
+    talk handle server
 
 port :: PortNumber
 port = 44444
@@ -55,11 +32,18 @@ newtype Server =
     { clients :: TVar (Map.Map ClientName Client)
     }
 
-talk :: Socket -> Server -> IO ()
-talk sock server = do
-  _ <- send sock "What is your name?"
-  receivedName <- recv sock 2048
-  unless (S.null receivedName) (addClient server (show receivedName) 100)
+talk :: Handle -> Server -> IO ()
+talk handle server = do
+  hSetNewlineMode handle universalNewlineMode
+  hSetBuffering handle LineBuffering
+  readName
+  where
+    readName = do
+      hPutStrLn handle "What is your name?"
+      name <- hGetLine handle
+      if null name
+        then readName
+        else addClient handle server name 100
 
 newServer :: IO Server
 newServer =
@@ -67,9 +51,9 @@ newServer =
     emptyClients <- newTVar Map.empty
     return $ Server emptyClients
 
-addClient :: Server -> ClientName -> Int -> IO ()
-addClient server newClient initialBalance =
-  runSTM $ addClientSTM server newClient initialBalance
+addClient :: Handle -> Server -> ClientName -> Int -> IO ()
+addClient handle server newClient initialBalance =
+  runSTM handle $ addClientSTM server newClient initialBalance
 
 addClientSTM :: Server -> ClientName -> Int -> STMReturnType String
 addClientSTM server newClient initialBalance = do
@@ -81,8 +65,9 @@ addClientSTM server newClient initialBalance = do
       modifyTVar (clients server) (Map.insert newClient (Client newBalance))
       return $ Success $ newClient ++ " successfully added"
 
-removeClient :: Server -> ClientName -> IO ()
-removeClient server newClient = runSTM $ removeClientSTM server newClient
+removeClient :: Handle -> Server -> ClientName -> IO ()
+removeClient handle server newClient =
+  runSTM handle $ removeClientSTM server newClient
 
 removeClientSTM :: Server -> ClientName -> STMReturnType String
 removeClientSTM server clientToRemove = do
@@ -93,26 +78,29 @@ removeClientSTM server clientToRemove = do
       modifyTVar (clients server) (Map.delete clientToRemove)
       return $ Success $ clientToRemove ++ " successfully deleted"
 
-payDebt :: Server -> ClientName -> ClientName -> Int -> IO ()
-payDebt server startClient endClient amount = do
+payDebt :: Handle -> Server -> ClientName -> ClientName -> Int -> IO ()
+payDebt handle server startClient endClient amount = do
   maybeRemainder <-
     atomically $ transferReturningRemainder server startClient endClient amount
   case maybeRemainder of
-    Failure errorMessage -> print errorMessage
-    Success Nothing -> putStrLn "Successful transaction"
+    Failure errorMessage -> hPrint handle errorMessage
+    Success Nothing -> hPutStrLn handle "Successful transaction"
     Success (Just remainder) -> do
-      putStrLn
+      hPutStrLn
+        handle
         ("Insufficient funds to make complete transfer. The account has been emptied and the remaining balance " ++
          show remainder ++ " will be taken where there are sufficient funds")
-      transferWithRetry server startClient endClient remainder
+      transferWithRetry handle server startClient endClient remainder
 
-transferWithError :: Server -> ClientName -> ClientName -> Int -> IO ()
-transferWithError server startClient endClient amount =
-  runSTM $ transferSTM False server startClient endClient amount
+transferWithError ::
+     Handle -> Server -> ClientName -> ClientName -> Int -> IO ()
+transferWithError handle server startClient endClient amount =
+  runSTM handle $ transferSTM False server startClient endClient amount
 
-transferWithRetry :: Server -> ClientName -> ClientName -> Int -> IO ()
-transferWithRetry server startClient endClient amount =
-  runSTM $ transferSTM True server startClient endClient amount
+transferWithRetry ::
+     Handle -> Server -> ClientName -> ClientName -> Int -> IO ()
+transferWithRetry handle server startClient endClient amount =
+  runSTM handle $ transferSTM True server startClient endClient amount
 
 transferReturningRemainder ::
      Server -> ClientName -> ClientName -> Int -> STMReturnType (Maybe Int)
@@ -147,8 +135,9 @@ transferSTM retryIfInsufficientFunds server startClient endClient amount = do
     validatedDeposit <*
     validatedWithdraw
 
-deposit :: Server -> ClientName -> Int -> IO ()
-deposit server client amount = runSTM $ depositSTM server client amount
+deposit :: Handle -> Server -> ClientName -> Int -> IO ()
+deposit handle server client amount =
+  runSTM handle $ depositSTM server client amount
 
 depositSTM :: Server -> ClientName -> Int -> STMReturnType String
 depositSTM server client amount = do
@@ -159,8 +148,9 @@ depositSTM server client amount = do
       modifyTVar (balance clientToUpdate) (+ amount)
       return $ Success "Successful deposit"
 
-withdraw :: Server -> ClientName -> Int -> IO ()
-withdraw server client amount = runSTM $ withdrawWithError server client amount
+withdraw :: Handle -> Server -> ClientName -> Int -> IO ()
+withdraw handle server client amount =
+  runSTM handle $ withdrawWithError server client amount
 
 withdrawWithError :: Server -> ClientName -> Int -> STMReturnType String
 withdrawWithError = withdrawSTM False
@@ -202,12 +192,12 @@ showBalanceSTM server client = do
       currentBalance <- readTVar (balance clientToUpdate)
       return $ Success currentBalance
 
-runSTM :: Show a => STMReturnType a -> IO ()
-runSTM stm = do
+runSTM :: Show a => Handle -> STMReturnType a -> IO ()
+runSTM handle stm = do
   errorOrSuccess <- atomically stm
   case errorOrSuccess of
-    Success successMessage -> print successMessage
-    Failure txnError -> print txnError
+    Success successMessage -> hPrint handle successMessage
+    Failure txnError -> hPrint handle txnError
 
 type STMReturnType a = STM (Validation TransactionError a)
 

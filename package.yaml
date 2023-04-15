@@ -24,6 +24,7 @@ dependencies:
 - containers
 - hspec
 - network
+- network-run
 - stm
 - validation
 
