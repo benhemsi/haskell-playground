@@ -2,11 +2,11 @@
 
 module Transactions.Transactions where
 
-import Control.Concurrent
 import Control.Concurrent.STM
 import Data.List (intercalate)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map as Map
+import Data.Time.Clock
 import Data.Validation
 import Network.Run.TCP
 import Network.Socket
@@ -43,6 +43,8 @@ newtype Server =
 data ClientAction
   = Transfer
   | ShowBalance
+  | Deposit
+  | Withdraw
   | LogOut
   deriving (Show, Read, Enum, Bounded)
 
@@ -85,6 +87,8 @@ runClientAction server client action =
   case action of
     Transfer -> transferWithError server client
     ShowBalance -> showBalance client
+    Deposit -> deposit client
+    Withdraw -> withdraw client
     LogOut -> logOut server client
 
 newServer :: IO Server
@@ -273,20 +277,24 @@ transferSTM retryIfInsufficientFunds startClient endClient amount = do
   _ <- depositSTM endClient amount
   withdrawSTM retryIfInsufficientFunds startClient amount
 
-deposit :: Client -> Int -> IO ()
-deposit client amount = do
+deposit :: Client -> IO ()
+deposit client = do
+  printClientMessage client "How much would you like to deposit?"
+  amount <- getAmount (clientHandle client)
   _ <- atomically $ depositSTM client amount
   printClientMessage client $ "Successful deposit of " ++ show amount
 
 depositSTM :: Client -> Int -> STM ()
 depositSTM client amount = modifyTVar (balance client) (+ amount)
 
-withdraw :: Client -> Int -> IO ()
-withdraw client amount =
+withdraw :: Client -> IO ()
+withdraw client = do
+  printClientMessage client "How much would you like to withdraw?"
+  amount <- getAmount (clientHandle client)
   runSTM
     (clientHandle client)
     (withdrawWithError client amount)
-    (const "Successful withdraw")
+    (const $ "Successful withdraw of " ++ show amount)
 
 withdrawWithError :: Client -> Int -> STMReturnType ()
 withdrawWithError = withdrawSTM False
@@ -314,7 +322,10 @@ sendMessage client message = do
   clientLoggedIn <- readTVarIO (loggedIn client)
   if clientLoggedIn
     then printClientMessage client message
-    else atomically $ writeTQueue (messages client) message
+    else do
+      currentTime <- getCurrentTime
+      atomically $
+        writeTQueue (messages client) $ show currentTime ++ ": " ++ message
 
 printAllMessages :: Client -> IO ()
 printAllMessages client = do
@@ -336,7 +347,7 @@ readAllMessages client = flushTQueue (messages client)
 showBalance :: Client -> IO ()
 showBalance client = do
   bal <- readTVarIO (balance client)
-  printClientMessage client $ "Current balance is " ++ show bal ++ "\n"
+  printClientMessage client $ "Current balance is " ++ show bal
 
 printClientMessage :: Client -> String -> IO ()
 printClientMessage client = hPutStrLn (clientHandle client)
