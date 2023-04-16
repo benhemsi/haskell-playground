@@ -3,6 +3,7 @@
 module Transactions.Transactions where
 
 import Control.Concurrent.STM
+import Data.List (intercalate)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map as Map
 import Data.Validation
@@ -36,12 +37,18 @@ newtype Server =
     { clients :: TVar (Map.Map ClientName Client)
     }
 
+data ClientAction
+  = Transfer
+  | ShowBalance
+  | LogOut
+  deriving (Show, Read, Enum, Bounded)
+
 talk :: Handle -> Server -> IO ()
 talk handle server = do
   hSetNewlineMode handle universalNewlineMode
   hSetBuffering handle LineBuffering
   client <- start
-  takeRequest client
+  clientAction handle server client
   where
     start = do
       hPutStrLn handle "Select 'signUp' or 'logIn'"
@@ -53,20 +60,29 @@ talk handle server = do
                else do
                  hPutStrLn handle "Invalid command"
                  start
-    takeRequest client = do
-      hPutStrLn handle "Select 'transfer' or 'showBalance'"
-      action <- hGetLine handle
-      if action == "transfer"
-        then do
-          transferWithError handle server client
-          takeRequest client
-        else if action == "showBalance"
-               then do
-                 showBalance handle client
-                 takeRequest client
-               else do
-                 hPutStrLn handle $ action ++ " is invalid. Choose again"
-                 takeRequest client
+
+clientAction :: Handle -> Server -> Client -> IO ()
+clientAction handle server client = do
+  let options :: [ClientAction]
+      options = [minBound .. maxBound]
+  hPutStrLn handle $
+    "Select one of the following: " ++ intercalate ", " (map show options)
+  response <- hGetLine handle
+  let maybeAction = readMaybe response
+  case maybeAction of
+    Nothing -> do
+      hPutStrLn handle "Invalid response. Try again"
+      clientAction handle server client
+    Just action -> do
+      runClientAction handle server client action
+      clientAction handle server client
+
+runClientAction :: Handle -> Server -> Client -> ClientAction -> IO ()
+runClientAction handle server client action =
+  case action of
+    Transfer -> transferWithError handle server client
+    ShowBalance -> showBalance handle client
+    LogOut -> logOut handle server client
 
 newServer :: IO Server
 newServer =
@@ -81,9 +97,9 @@ addClient handle server = do
   hPutStrLn handle "Choose your password"
   psw <- enterPassword
   hPutStrLn handle "How much would you like to deposit?"
-  initialBalance <- enterDeposit
+  initialBalance <- getAmount handle
   client <- atomically (addClientSTM server clientName psw initialBalance)
-  hPutStrLn handle $ clientName ++ "successfully added"
+  hPutStrLn handle $ clientName ++ " successfully added"
   return client
   where
     enterName = do
@@ -107,19 +123,6 @@ addClient handle server = do
           hPutStrLn handle "Password must be 5 characters or more. Try again"
           enterPassword
         else return psw
-    enterDeposit = do
-      initialBalanceStr <- hGetLine handle
-      let initialBalance = readMaybe initialBalanceStr :: Maybe Int
-      case initialBalance of
-        Just bal ->
-          if bal > 0
-            then return bal
-            else do
-              hPutStrLn handle "Balance must be greater than zero. Try again"
-              enterDeposit
-        Nothing -> do
-          hPutStrLn handle "Invalid number. Try again"
-          enterDeposit
 
 -- requires that the client does not already exist
 addClientSTM :: Server -> ClientName -> String -> Int -> STM Client
@@ -141,10 +144,16 @@ logIn handle server = do
       if psw == password client
         then do
           hPutStrLn handle "Successful login"
+          _ <- atomically $ writeTVar (loggedIn client) True
           return client
         else do
           hPutStrLn handle "Incorrect passord. Try again"
           enterPassword client
+
+logOut :: Handle -> Server -> Client -> IO ()
+logOut handle server client = do
+  _ <- atomically $ writeTVar (loggedIn client) False
+  talk handle server
 
 getAmount :: Handle -> IO Int
 getAmount handle = do
@@ -216,8 +225,7 @@ transferWithError handle server startClient = do
   hPutStrLn handle "Who would you like to transfer with?"
   endClient <- getClient handle server
   hPutStrLn handle "How much would you like to send?"
-  amountStr <- hGetLine handle
-  let amount = read amountStr :: Int
+  amount <- getAmount handle
   runSTM
     handle
     (transferSTM False startClient endClient amount)
