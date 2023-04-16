@@ -2,6 +2,7 @@
 
 module Transactions.Transactions where
 
+import Control.Concurrent
 import Control.Concurrent.STM
 import Data.List (intercalate)
 import qualified Data.List.NonEmpty as NE
@@ -27,9 +28,11 @@ type ClientName = String
 data Client =
   Client
     { name :: String
+    , clientHandle :: Handle
     , balance :: TVar Int
     , password :: String
     , loggedIn :: TVar Bool
+    , messages :: TQueue String
     }
 
 newtype Server =
@@ -48,7 +51,7 @@ talk handle server = do
   hSetNewlineMode handle universalNewlineMode
   hSetBuffering handle LineBuffering
   client <- start
-  clientAction handle server client
+  clientAction server client
   where
     start = do
       hPutStrLn handle "Select 'signUp' or 'logIn'"
@@ -61,28 +64,28 @@ talk handle server = do
                  hPutStrLn handle "Invalid command"
                  start
 
-clientAction :: Handle -> Server -> Client -> IO ()
-clientAction handle server client = do
+clientAction :: Server -> Client -> IO ()
+clientAction server client = do
   let options :: [ClientAction]
       options = [minBound .. maxBound]
-  hPutStrLn handle $
+  printClientMessage client $
     "Select one of the following: " ++ intercalate ", " (map show options)
-  response <- hGetLine handle
+  response <- hGetLine (clientHandle client)
   let maybeAction = readMaybe response
   case maybeAction of
     Nothing -> do
-      hPutStrLn handle "Invalid response. Try again"
-      clientAction handle server client
+      printClientMessage client "Invalid response. Try again"
+      clientAction server client
     Just action -> do
-      runClientAction handle server client action
-      clientAction handle server client
+      runClientAction server client action
+      clientAction server client
 
-runClientAction :: Handle -> Server -> Client -> ClientAction -> IO ()
-runClientAction handle server client action =
+runClientAction :: Server -> Client -> ClientAction -> IO ()
+runClientAction server client action =
   case action of
-    Transfer -> transferWithError handle server client
-    ShowBalance -> showBalance handle client
-    LogOut -> logOut handle server client
+    Transfer -> transferWithError server client
+    ShowBalance -> showBalance client
+    LogOut -> logOut server client
 
 newServer :: IO Server
 newServer =
@@ -98,8 +101,9 @@ addClient handle server = do
   psw <- enterPassword
   hPutStrLn handle "How much would you like to deposit?"
   initialBalance <- getAmount handle
-  client <- atomically (addClientSTM server clientName psw initialBalance)
-  hPutStrLn handle $ clientName ++ " successfully added"
+  client <-
+    atomically (addClientSTM handle server clientName psw initialBalance)
+  printClientMessage client $ clientName ++ " successfully added"
   return client
   where
     enterName = do
@@ -125,39 +129,41 @@ addClient handle server = do
         else return psw
 
 -- requires that the client does not already exist
-addClientSTM :: Server -> ClientName -> String -> Int -> STM Client
-addClientSTM server clientName psw initialBalance = do
+addClientSTM :: Handle -> Server -> ClientName -> String -> Int -> STM Client
+addClientSTM handle server clientName psw initialBalance = do
   newBalance <- newTVar initialBalance
   loggedInBool <- newTVar True
-  let newClient = Client clientName newBalance psw loggedInBool
+  emptyMessages <- newTQueue
+  let newClient =
+        Client clientName handle newBalance psw loggedInBool emptyMessages
   modifyTVar (clients server) (Map.insert clientName newClient)
   return newClient
 
 logIn :: Handle -> Server -> IO Client
 logIn handle server = do
   client <- getClient handle server
-  hPutStrLn handle "Enter password:"
+  printClientMessage client "Enter password:"
   enterPassword client
   where
     enterPassword client = do
       psw <- hGetLine handle
       if psw == password client
         then do
-          hPutStrLn handle "Successful login"
+          printClientMessage client "Successful login"
           _ <- atomically $ writeTVar (loggedIn client) True
+          printAllMessages client
           return client
         else do
-          hPutStrLn handle "Incorrect passord. Try again"
+          printClientMessage client "Incorrect passord. Try again"
           enterPassword client
 
-logOut :: Handle -> Server -> Client -> IO ()
-logOut handle server client = do
+logOut :: Server -> Client -> IO ()
+logOut server client = do
   _ <- atomically $ writeTVar (loggedIn client) False
-  talk handle server
+  talk (clientHandle client) server
 
 getAmount :: Handle -> IO Int
-getAmount handle = do
-  enterAmount
+getAmount handle = enterAmount
   where
     enterAmount = do
       amountStr <- hGetLine handle
@@ -220,18 +226,20 @@ removeClientSTM server clientToRemove = do
 --         ("Insufficient funds to make complete transfer. The account has been emptied and the remaining balance " ++
 --          show remainder ++ " will be taken where there are sufficient funds")
 --       transferWithRetry handle server startClient endClient remainder
-transferWithError :: Handle -> Server -> Client -> IO ()
-transferWithError handle server startClient = do
-  hPutStrLn handle "Who would you like to transfer with?"
-  endClient <- getClient handle server
-  hPutStrLn handle "How much would you like to send?"
-  amount <- getAmount handle
-  runSTM
-    handle
-    (transferSTM False startClient endClient amount)
-    (\_ ->
-       "Successful transaction from " ++
-       name startClient ++ " to " ++ name endClient)
+transferWithError :: Server -> Client -> IO ()
+transferWithError server startClient = do
+  printClientMessage startClient "Who would you like to transfer with?"
+  endClient <- getClient (clientHandle startClient) server
+  printClientMessage startClient "How much would you like to send?"
+  amount <- getAmount (clientHandle startClient)
+  maybeTransfer <- atomically (transferSTM False startClient endClient amount)
+  case maybeTransfer of
+    Success _ -> do
+      printClientMessage startClient $
+        "Successfully sent money to " ++ name endClient
+      sendMessage endClient $
+        "Received " ++ show amount ++ " from " ++ name startClient
+    Failure txnError -> printClientMessage startClient (show txnError)
 
 -- transferWithRetry ::
 --      Handle -> ClientName -> ClientName -> Int -> IO ()
@@ -265,17 +273,20 @@ transferSTM retryIfInsufficientFunds startClient endClient amount = do
   _ <- depositSTM endClient amount
   withdrawSTM retryIfInsufficientFunds startClient amount
 
-deposit :: Handle -> Client -> Int -> IO ()
-deposit handle client amount = do
+deposit :: Client -> Int -> IO ()
+deposit client amount = do
   _ <- atomically $ depositSTM client amount
-  hPutStrLn handle $ "Successful deposit of " ++ show amount
+  printClientMessage client $ "Successful deposit of " ++ show amount
 
 depositSTM :: Client -> Int -> STM ()
 depositSTM client amount = modifyTVar (balance client) (+ amount)
 
-withdraw :: Handle -> Client -> Int -> IO ()
-withdraw handle client amount =
-  runSTM handle (withdrawWithError client amount) (const "Successful withdraw")
+withdraw :: Client -> Int -> IO ()
+withdraw client amount =
+  runSTM
+    (clientHandle client)
+    (withdrawWithError client amount)
+    (const "Successful withdraw")
 
 withdrawWithError :: Client -> Int -> STMReturnType ()
 withdrawWithError = withdrawSTM False
@@ -298,10 +309,37 @@ withdrawSTM retryIfInsufficientFunds client amount = do
       modifyTVar (balance client) (\current -> current - amount)
       return $ Success ()
 
-showBalance :: Handle -> Client -> IO ()
-showBalance handle client = do
+sendMessage :: Client -> String -> IO ()
+sendMessage client message = do
+  clientLoggedIn <- readTVarIO (loggedIn client)
+  if clientLoggedIn
+    then printClientMessage client message
+    else atomically $ writeTQueue (messages client) message
+
+printAllMessages :: Client -> IO ()
+printAllMessages client = do
+  allMessages <- atomically $ readAllMessages client
+  if null allMessages
+    then printClientMessage
+           client
+           "You have received no messages since your previous log in"
+    else do
+      let messagesToPrint = intercalate "\n" allMessages
+      printClientMessage
+        client
+        "You received the following messages since your previous log in:"
+      printClientMessage client messagesToPrint
+
+readAllMessages :: Client -> STM [String]
+readAllMessages client = flushTQueue (messages client)
+
+showBalance :: Client -> IO ()
+showBalance client = do
   bal <- readTVarIO (balance client)
-  hPutStr handle $ "Current balance is " ++ show bal ++ "\n"
+  printClientMessage client $ "Current balance is " ++ show bal ++ "\n"
+
+printClientMessage :: Client -> String -> IO ()
+printClientMessage client = hPutStrLn (clientHandle client)
 
 runSTM :: Handle -> STMReturnType a -> (a -> String) -> IO ()
 runSTM handle stm logMessage = do
