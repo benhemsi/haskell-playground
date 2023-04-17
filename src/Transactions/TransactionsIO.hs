@@ -1,11 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Transactions.Transactions where
+module Transactions.TransactionsIO where
 
 import Control.Concurrent.STM
 import Data.Hashable
 import Data.List (intercalate)
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Map as Map
 import Data.Time.Clock
 import Data.Validation
@@ -13,6 +12,10 @@ import Network.Run.TCP
 import Network.Socket
 import System.IO
 import Text.Read
+import Transactions.Client
+import Transactions.Server
+import Transactions.TransactionError
+import Transactions.TransactionsSTM
 
 transactionsMain :: IO ()
 transactionsMain = do
@@ -23,23 +26,6 @@ transactionsMain = do
 
 port :: PortNumber
 port = 44444
-
-type ClientName = String
-
-data Client =
-  Client
-    { name :: String
-    , clientHandle :: Handle
-    , balance :: TVar Int
-    , password :: Int
-    , loggedIn :: TVar Bool
-    , messages :: TQueue String
-    }
-
-newtype Server =
-  Server
-    { clients :: TVar (Map.Map ClientName Client)
-    }
 
 data ClientAction
   = Transfer
@@ -133,23 +119,6 @@ addClient handle server = do
           enterPassword
         else return psw
 
--- requires that the client does not already exist
-addClientSTM :: Handle -> Server -> ClientName -> String -> Int -> STM Client
-addClientSTM handle server clientName psw initialBalance = do
-  newBalance <- newTVar initialBalance
-  loggedInBool <- newTVar True
-  emptyMessages <- newTQueue
-  let newClient =
-        Client
-          clientName
-          handle
-          newBalance
-          (hash psw)
-          loggedInBool
-          emptyMessages
-  modifyTVar (clients server) (Map.insert clientName newClient)
-  return newClient
-
 logIn :: Handle -> Server -> IO Client
 logIn handle server = do
   client <- getClient handle server
@@ -202,28 +171,12 @@ getClient handle server = do
       hPrint handle txnError
       getClient handle server
 
-getClientSTM :: Server -> ClientName -> STMReturnType Client
-getClientSTM server clientName = do
-  currentClients <- readTVar (clients server)
-  case Map.lookup clientName currentClients of
-    Just client -> return $ Success client
-    Nothing -> return $ Failure (ClientDoesNotExist clientName)
-
 removeClient :: Handle -> Server -> ClientName -> IO ()
 removeClient handle server newClient =
   runSTM
     handle
     (removeClientSTM server newClient)
     (\_ -> newClient ++ " successfully deleted")
-
-removeClientSTM :: Server -> ClientName -> STMReturnType ()
-removeClientSTM server clientToRemove = do
-  currentClients <- readTVar (clients server)
-  if Map.notMember clientToRemove currentClients
-    then return $ Failure (ClientDoesNotExist clientToRemove)
-    else do
-      modifyTVar (clients server) (Map.delete clientToRemove)
-      return $ Success ()
 
 -- payDebt :: Handle -> Server -> ClientName -> ClientName -> Int -> IO ()
 -- payDebt handle server startClient endClient amount = do
@@ -275,25 +228,12 @@ transferWithError server startClient = do
 --         else do
 --           _ <- transferSTM False server startClient endClient currentBalance
 --           return $ Success (Just (amount - currentBalance))
-transferSTM ::
-     Bool -- retry transaction
-  -> Client
-  -> Client
-  -> Int
-  -> STMReturnType ()
-transferSTM retryIfInsufficientFunds startClient endClient amount = do
-  _ <- depositSTM endClient amount
-  withdrawSTM retryIfInsufficientFunds startClient amount
-
 deposit :: Client -> IO ()
 deposit client = do
   printClientMessage client "How much would you like to deposit?"
   amount <- getAmount (clientHandle client)
   _ <- atomically $ depositSTM client amount
   printClientMessage client $ "Successful deposit of " ++ show amount
-
-depositSTM :: Client -> Int -> STM ()
-depositSTM client amount = modifyTVar (balance client) (+ amount)
 
 withdraw :: Client -> IO ()
 withdraw client = do
@@ -303,27 +243,6 @@ withdraw client = do
     (clientHandle client)
     (withdrawWithError client amount)
     (const $ "Successful withdraw of " ++ show amount)
-
-withdrawWithError :: Client -> Int -> STMReturnType ()
-withdrawWithError = withdrawSTM False
-
-withdrawWithRetry :: Client -> Int -> STMReturnType ()
-withdrawWithRetry = withdrawSTM True
-
-withdrawSTM ::
-     Bool -- retries if true, throws an error if false
-  -> Client
-  -> Int
-  -> STMReturnType ()
-withdrawSTM retryIfInsufficientFunds client amount = do
-  currentBalance <- readTVar (balance client)
-  if currentBalance < amount
-    then if retryIfInsufficientFunds
-           then retry
-           else return $ Failure (InsufficientFunds (name client) amount)
-    else do
-      modifyTVar (balance client) (\current -> current - amount)
-      return $ Success ()
 
 sendMessage :: Client -> String -> IO ()
 sendMessage client message = do
@@ -349,9 +268,6 @@ printAllMessages client = do
         "You received the following messages since your previous log in:"
       printClientMessage client messagesToPrint
 
-readAllMessages :: Client -> STM [String]
-readAllMessages client = flushTQueue (messages client)
-
 showBalance :: Client -> IO ()
 showBalance client = do
   bal <- readTVarIO (balance client)
@@ -366,32 +282,3 @@ runSTM handle stm logMessage = do
   case errorOrSuccess of
     Success output -> hPutStrLn handle $ logMessage output
     Failure txnError -> hPrint handle txnError
-
-type STMReturnType a = STM (Validation TransactionError a)
-
-data TransactionError
-  = ClientDoesNotExist ClientName
-  | InsufficientFunds ClientName Int
-  | ClientAlreadyExists ClientName
-  | CombinedTransactionError (NE.NonEmpty TransactionError)
-
-instance Show TransactionError where
-  show (ClientDoesNotExist clientName) =
-    "Failed: " ++ clientName ++ " is not an existing client."
-  show (InsufficientFunds clientName amount) =
-    "Failed: " ++
-    clientName ++
-    " does not have sufficient funds to withdraw " ++ show amount ++ "."
-  show (ClientAlreadyExists clientName) =
-    "Failed: " ++ clientName ++ " is an existing client."
-  show (CombinedTransactionError errors) =
-    concatMap (\e -> show e ++ "\n") errors
-
-instance Semigroup TransactionError where
-  CombinedTransactionError xErrors <> CombinedTransactionError yErrors =
-    CombinedTransactionError (xErrors <> yErrors)
-  CombinedTransactionError xErrors <> yError =
-    CombinedTransactionError (xErrors <> NE.fromList [yError])
-  xError <> CombinedTransactionError yErrors =
-    CombinedTransactionError (xError NE.<| yErrors)
-  xError <> yError = CombinedTransactionError $ NE.fromList [xError, yError]

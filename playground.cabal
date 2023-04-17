@@ -23,7 +23,11 @@ source-repository head
 
 library
   exposed-modules:
-      Transactions.Transactions
+      Transactions.Client
+      Transactions.Server
+      Transactions.TransactionError
+      Transactions.TransactionsIO
+      Transactions.TransactionsSTM
   other-modules:
       Paths_playground
   hs-source-dirs:

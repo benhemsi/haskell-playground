@@ -1,6 +1,6 @@
 module Main where
 
-import Transactions.Transactions
+import Transactions.TransactionsIO
 
 main :: IO ()
 main = transactionsMain
