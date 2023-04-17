@@ -3,6 +3,7 @@
 module Transactions.Transactions where
 
 import Control.Concurrent.STM
+import Data.Hashable
 import Data.List (intercalate)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map as Map
@@ -30,7 +31,7 @@ data Client =
     { name :: String
     , clientHandle :: Handle
     , balance :: TVar Int
-    , password :: String
+    , password :: Int
     , loggedIn :: TVar Bool
     , messages :: TQueue String
     }
@@ -139,7 +140,13 @@ addClientSTM handle server clientName psw initialBalance = do
   loggedInBool <- newTVar True
   emptyMessages <- newTQueue
   let newClient =
-        Client clientName handle newBalance psw loggedInBool emptyMessages
+        Client
+          clientName
+          handle
+          newBalance
+          (hash psw)
+          loggedInBool
+          emptyMessages
   modifyTVar (clients server) (Map.insert clientName newClient)
   return newClient
 
@@ -151,7 +158,7 @@ logIn handle server = do
   where
     enterPassword client = do
       psw <- hGetLine handle
-      if psw == password client
+      if hash psw == password client
         then do
           printClientMessage client "Successful login"
           _ <- atomically $ writeTVar (loggedIn client) True
@@ -164,6 +171,7 @@ logIn handle server = do
 logOut :: Server -> Client -> IO ()
 logOut server client = do
   _ <- atomically $ writeTVar (loggedIn client) False
+  printClientMessage client "Successful log out"
   talk (clientHandle client) server
 
 getAmount :: Handle -> IO Int
