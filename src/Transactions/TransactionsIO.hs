@@ -59,7 +59,7 @@ clientAction server client = do
       options = [minBound .. maxBound]
   printClientMessage client $
     "Select one of the following: " ++ intercalate ", " (map show options)
-  response <- hGetLine (clientHandle client)
+  response <- clientGetLine client
   let maybeAction = readMaybe response
   case maybeAction of
     Nothing -> do
@@ -122,15 +122,18 @@ addClient handle server = do
 logIn :: Handle -> Server -> IO Client
 logIn handle server = do
   client <- getClient handle server
-  printClientMessage client "Enter password:"
+  hPutStrLn handle "Enter password:"
   enterPassword client
   where
     enterPassword client = do
       psw <- hGetLine handle
       if hash psw == password client
         then do
-          printClientMessage client "Successful login"
-          _ <- atomically $ writeTVar (loggedIn client) True
+          hPutStrLn handle "Successful login"
+          _ <-
+            atomically $ do
+              _ <- writeTVar (loggedIn client) True
+              writeTVar (clientHandle client) handle
           printAllMessages client
           return client
         else do
@@ -141,7 +144,8 @@ logOut :: Server -> Client -> IO ()
 logOut server client = do
   _ <- atomically $ writeTVar (loggedIn client) False
   printClientMessage client "Successful log out"
-  talk (clientHandle client) server
+  handle <- readTVarIO (clientHandle client)
+  talk handle server
 
 getAmount :: Handle -> IO Int
 getAmount handle = enterAmount
@@ -194,9 +198,10 @@ removeClient handle server newClient =
 transferWithError :: Server -> Client -> IO ()
 transferWithError server startClient = do
   printClientMessage startClient "Who would you like to transfer with?"
-  endClient <- getClient (clientHandle startClient) server
+  handle <- readTVarIO (clientHandle startClient)
+  endClient <- getClient handle server
   printClientMessage startClient "How much would you like to send?"
-  amount <- getAmount (clientHandle startClient)
+  amount <- getAmount handle
   maybeTransfer <- atomically (transferSTM False startClient endClient amount)
   case maybeTransfer of
     Success _ -> do
@@ -231,16 +236,18 @@ transferWithError server startClient = do
 deposit :: Client -> IO ()
 deposit client = do
   printClientMessage client "How much would you like to deposit?"
-  amount <- getAmount (clientHandle client)
+  handle <- readTVarIO (clientHandle client)
+  amount <- getAmount handle
   _ <- atomically $ depositSTM client amount
   printClientMessage client $ "Successful deposit of " ++ show amount
 
 withdraw :: Client -> IO ()
 withdraw client = do
   printClientMessage client "How much would you like to withdraw?"
-  amount <- getAmount (clientHandle client)
+  handle <- readTVarIO (clientHandle client)
+  amount <- getAmount handle
   runSTM
-    (clientHandle client)
+    handle
     (withdrawWithError client amount)
     (const $ "Successful withdraw of " ++ show amount)
 
@@ -274,7 +281,14 @@ showBalance client = do
   printClientMessage client $ "Current balance is " ++ show bal
 
 printClientMessage :: Client -> String -> IO ()
-printClientMessage client = hPutStrLn (clientHandle client)
+printClientMessage client message = do
+  handle <- readTVarIO (clientHandle client)
+  hPutStrLn handle message
+
+clientGetLine :: Client -> IO String
+clientGetLine client = do
+  handle <- readTVarIO (clientHandle client)
+  hGetLine handle
 
 runSTM :: Handle -> STMReturnType a -> (a -> String) -> IO ()
 runSTM handle stm logMessage = do

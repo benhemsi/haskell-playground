@@ -24,10 +24,11 @@ addClientSTM handle server clientName psw initialBalance = do
   newBalance <- newTVar initialBalance
   loggedInBool <- newTVar True
   emptyMessages <- newTQueue
+  handleTVar <- newTVar handle
   let newClient =
         Client
           clientName
-          handle
+          handleTVar
           newBalance
           (hash psw)
           loggedInBool
