@@ -27,6 +27,11 @@ transactionsMain = do
 port :: PortNumber
 port = 44444
 
+data StartAction
+  = SignUp
+  | LogIn
+  deriving (Show, Read, Enum, Bounded)
+
 data ClientAction
   = Transfer
   | ShowBalance
@@ -39,19 +44,28 @@ talk :: Handle -> Server -> IO ()
 talk handle server = do
   hSetNewlineMode handle universalNewlineMode
   hSetBuffering handle LineBuffering
-  client <- start
+  client <- startAction handle server
   clientAction server client
-  where
-    start = do
-      hPutStrLn handle "Select 'signUp' or 'logIn'"
-      startCommand <- hGetLine handle
-      if startCommand == "signUp"
-        then addClient handle server
-        else if startCommand == "logIn"
-               then logIn handle server
-               else do
-                 hPutStrLn handle "Invalid command"
-                 start
+
+startAction :: Handle -> Server -> IO Client
+startAction handle server = do
+  let options :: [StartAction]
+      options = [minBound .. maxBound]
+  hPutStrLn handle $
+    "Select one of the following: " ++ intercalate ", " (map show options)
+  response <- hGetLine handle
+  case readMaybe response of
+    Nothing -> do
+      hPutStrLn handle "Invalid response. Try again"
+      startAction handle server
+    Just action -> do
+      runStartAction handle server action
+
+runStartAction :: Handle -> Server -> StartAction -> IO Client
+runStartAction handle server action =
+  case action of
+    SignUp -> addClient handle server
+    LogIn -> logIn handle server
 
 clientAction :: Server -> Client -> IO ()
 clientAction server client = do
@@ -60,8 +74,7 @@ clientAction server client = do
   printClientMessage client $
     "Select one of the following: " ++ intercalate ", " (map show options)
   response <- clientGetLine client
-  let maybeAction = readMaybe response
-  case maybeAction of
+  case readMaybe response of
     Nothing -> do
       printClientMessage client "Invalid response. Try again"
       clientAction server client
