@@ -11,13 +11,21 @@ import Test.QuickCheck.Monadic
 import Transactions.Client
 import Transactions.TransactionsSTM
 
-maxBalance = 10
+data RunInfo =
+  RunInfo
+    { numberOfClients, initialAmount, finalAmount, successfulTxnCount, failedTxnCount :: Int
+    }
+  deriving (Show)
 
-maxClientNumber = 10
+maxBalance = 100
 
-minTxnNumber = 10
+minClientNumber = 10
 
-maxTxnNumber = 10
+maxClientNumber = 100
+
+minTxnNumber = 1
+
+maxTxnNumber = 100
 
 testHandle :: IO Handle
 testHandle = openFile "test/Transactions/TransactionsSTMSpec.hs" ReadMode
@@ -72,28 +80,27 @@ runTxns txns = do
       invalidCount = length [e | V.Failure e <- runTransfers]
   return (validCount, invalidCount)
 
-generateAndRunTransactions :: Int -> Handle -> IO (Int, Int)
+generateAndRunTransactions :: Int -> Handle -> IO RunInfo
 generateAndRunTransactions numberOfClients handle = do
   clients <- join $ generate (generateClients numberOfClients handle)
   initialAmount <- readTotalClientAmount clients
-  putStrLn $ "Initial amount: " ++ show initialAmount
   txns <- generate $ generateTransactions numberOfClients clients
   (validCount, invalidCount) <- runTxns txns
-  putStrLn $ "Valid transfers: " ++ show validCount
-  putStrLn $ "Invalid transfers: " ++ show invalidCount
   endAmount <- readTotalClientAmount clients
-  putStrLn $ "End amount: " ++ show endAmount
-  return (initialAmount, endAmount)
+  return $
+    RunInfo numberOfClients initialAmount endAmount validCount invalidCount
 
 spec = do
   describe "transfer" $ do
-    it "should preserve the total sum of balances when only transfers are run" $
+    it
+      "should preserve the total sum of balances when only transfers without retrying are run" $
       monadicIO $ do
         handle <- run testHandle
-        clientN <- pick (chooseInt (0, maxClientNumber))
-        (initalAmount, endAmount) <-
-          run $ generateAndRunTransactions clientN handle
-        assert (initalAmount == endAmount)
+        clientN <- pick (chooseInt (minClientNumber, maxClientNumber))
+        runInfo <- run $ generateAndRunTransactions clientN handle
+        assert (initialAmount runInfo == finalAmount runInfo)
+        run $ print runInfo
+        monitor (counterexample (show runInfo))
     it "should move money from one client to another" $
       monadicIO $ do
         handle <- run testHandle

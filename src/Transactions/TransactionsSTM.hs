@@ -71,8 +71,10 @@ transferSTM ::
   -> Int
   -> STMReturnType ()
 transferSTM retryIfInsufficientFunds startClient endClient amount = do
-  _ <- depositSTM endClient amount
-  withdrawSTM retryIfInsufficientFunds startClient amount
+  validatedWithdraw <- withdrawSTM retryIfInsufficientFunds startClient amount
+  case validatedWithdraw of
+    Success _ -> fmap Success $ depositSTM endClient amount
+    failure -> return failure
 
 readAllMessages :: Client -> STM [String]
 readAllMessages client = flushTQueue (messages client)
