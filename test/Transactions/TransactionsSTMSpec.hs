@@ -23,9 +23,9 @@ minClientNumber = 10
 
 maxClientNumber = 100
 
-minTxnNumber = 1
+minTxnNumber = 500
 
-maxTxnNumber = 100
+maxTxnNumber = 1000
 
 testHandle :: IO Handle
 testHandle = openFile "test/Transactions/TransactionsSTMSpec.hs" ReadMode

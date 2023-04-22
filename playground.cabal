@@ -24,6 +24,7 @@ source-repository head
 library
   exposed-modules:
       Transactions.Client
+      Transactions.Message
       Transactions.Server
       Transactions.TransactionError
       Transactions.TransactionsIO

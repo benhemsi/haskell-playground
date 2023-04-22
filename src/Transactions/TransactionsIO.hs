@@ -13,6 +13,7 @@ import Network.Socket
 import System.IO
 import Text.Read
 import Transactions.Client
+import Transactions.Message
 import Transactions.Server
 import Transactions.TransactionError
 import Transactions.TransactionsSTM
@@ -220,8 +221,9 @@ transferWithError server startClient = do
     Success _ -> do
       printClientMessage startClient $
         "Successfully sent money to " ++ name endClient
+      currentTime <- getCurrentTime
       sendMessage endClient $
-        "Received " ++ show amount ++ " from " ++ name startClient
+        TransferReceived currentTime (name startClient) amount
     Failure txnError -> printClientMessage startClient (show txnError)
 
 -- transferWithRetry ::
@@ -264,15 +266,13 @@ withdraw client = do
     (withdrawWithError client amount)
     (const $ "Successful withdraw of " ++ show amount)
 
-sendMessage :: Client -> String -> IO ()
+sendMessage :: Client -> Message -> IO ()
 sendMessage client message = do
   clientLoggedIn <- readTVarIO (loggedIn client)
   if clientLoggedIn
-    then printClientMessage client message
+    then printClientMessage client (show message)
     else do
-      currentTime <- getCurrentTime
-      atomically $
-        writeTQueue (messages client) $ show currentTime ++ ": " ++ message
+      atomically $ writeTQueue (messages client) message
 
 printAllMessages :: Client -> IO ()
 printAllMessages client = do

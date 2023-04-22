@@ -73,11 +73,13 @@ transferSTM ::
 transferSTM retryIfInsufficientFunds startClient endClient amount = do
   validatedWithdraw <- withdrawSTM retryIfInsufficientFunds startClient amount
   case validatedWithdraw of
-    Success _ -> fmap Success $ depositSTM endClient amount
+    Success _ -> Success <$> depositSTM endClient amount
     failure -> return failure
 
 readAllMessages :: Client -> STM [String]
-readAllMessages client = flushTQueue (messages client)
+readAllMessages client = do
+  msgs <- flushTQueue (messages client)
+  return $ map show msgs
 
 removeClientSTM :: Server -> ClientName -> STMReturnType ()
 removeClientSTM server clientToRemove = do
