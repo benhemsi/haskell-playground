@@ -147,7 +147,7 @@ logIn handle server = do
           _ <-
             atomically $ do
               _ <- writeTVar (loggedIn client) True
-              writeTVar (clientHandle client) handle
+              putTMVar (clientHandle client) handle
           printAllMessages client
           return client
         else do
@@ -156,9 +156,11 @@ logIn handle server = do
 
 logOut :: Server -> Client -> IO ()
 logOut server client = do
-  _ <- atomically $ writeTVar (loggedIn client) False
   printClientMessage client "Successful log out"
-  handle <- readTVarIO (clientHandle client)
+  handle <-
+    atomically $ do
+      writeTVar (loggedIn client) False
+      takeTMVar (clientHandle client)
   talk handle server
 
 getAmount :: Handle -> IO Int
@@ -212,7 +214,7 @@ removeClient handle server newClient =
 transferWithError :: Server -> Client -> IO ()
 transferWithError server startClient = do
   printClientMessage startClient "Who would you like to transfer with?"
-  handle <- readTVarIO (clientHandle startClient)
+  handle <- atomically $ readTMVar (clientHandle startClient)
   endClient <- getClient handle server
   printClientMessage startClient "How much would you like to send?"
   amount <- getAmount handle
@@ -251,7 +253,7 @@ transferWithError server startClient = do
 deposit :: Client -> IO ()
 deposit client = do
   printClientMessage client "How much would you like to deposit?"
-  handle <- readTVarIO (clientHandle client)
+  handle <- atomically $ readTMVar (clientHandle client)
   amount <- getAmount handle
   _ <- atomically $ depositSTM client amount
   printClientMessage client $ "Successful deposit of " ++ show amount
@@ -259,7 +261,7 @@ deposit client = do
 withdraw :: Client -> IO ()
 withdraw client = do
   printClientMessage client "How much would you like to withdraw?"
-  handle <- readTVarIO (clientHandle client)
+  handle <- atomically $ readTMVar (clientHandle client)
   amount <- getAmount handle
   runSTM
     handle
@@ -295,12 +297,12 @@ showBalance client = do
 
 printClientMessage :: Client -> String -> IO ()
 printClientMessage client message = do
-  handle <- readTVarIO (clientHandle client)
+  handle <- atomically $ readTMVar (clientHandle client)
   hPutStrLn handle message
 
 clientGetLine :: Client -> IO String
 clientGetLine client = do
-  handle <- readTVarIO (clientHandle client)
+  handle <- atomically $ readTMVar (clientHandle client)
   hGetLine handle
 
 runSTM :: Handle -> STMReturnType a -> (a -> String) -> IO ()

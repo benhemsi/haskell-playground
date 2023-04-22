@@ -7,7 +7,7 @@ import Transactions.Message
 data Client =
   Client
     { name :: String
-    , clientHandle :: TVar Handle
+    , clientHandle :: TMVar Handle
     , balance :: TVar Int
     , password :: Int
     , loggedIn :: TVar Bool

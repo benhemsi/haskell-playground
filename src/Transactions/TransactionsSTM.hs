@@ -18,12 +18,12 @@ getClientSTM server clientName = do
     Just client -> return $ Success client
     Nothing -> return $ Failure (ClientDoesNotExist clientName)
 
-buildClientSTM :: Handle -> ClientName -> String -> Int -> STM Client
-buildClientSTM handle clientName psw initialBalance = do
+buildClientSTM :: Maybe Handle -> ClientName -> String -> Int -> STM Client
+buildClientSTM maybeHandle clientName psw initialBalance = do
   newBalance <- newTVar initialBalance
   loggedInBool <- newTVar True
   emptyMessages <- newTQueue
-  handleTVar <- newTVar handle
+  handleTVar <- maybe newEmptyTMVar newTMVar maybeHandle
   return $
     Client
       clientName
@@ -36,7 +36,7 @@ buildClientSTM handle clientName psw initialBalance = do
 -- requires that the client does not already exist
 addClientSTM :: Handle -> Server -> ClientName -> String -> Int -> STM Client
 addClientSTM handle server clientName psw initialBalance = do
-  newClient <- buildClientSTM handle clientName psw initialBalance
+  newClient <- buildClientSTM (Just handle) clientName psw initialBalance
   modifyTVar (clients server) (Map.insert clientName newClient)
   return newClient
 
