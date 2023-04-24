@@ -6,6 +6,7 @@ import qualified Data.Map as Map
 import Data.Validation
 import System.IO
 import Transactions.Client
+import Transactions.Message
 import Transactions.Server
 import Transactions.TransactionError
 
@@ -76,16 +77,21 @@ transferSTM retryIfInsufficientFunds startClient endClient amount = do
     Success _ -> Success <$> depositSTM endClient amount
     failure -> return failure
 
+adminGetMessageSTM :: Server -> STM Message
+adminGetMessageSTM server = readTQueue (messages $ admin server)
+
 readAllMessages :: Client -> STM [String]
 readAllMessages client = do
   msgs <- flushTQueue (messages client)
   return $ map show msgs
 
-removeClientSTM :: Server -> ClientName -> STMReturnType ()
+removeClientSTM :: Server -> ClientName -> STMReturnType Client
 removeClientSTM server clientToRemove = do
   currentClients <- readTVar (clients server)
-  if Map.notMember clientToRemove currentClients
-    then return $ Failure (ClientDoesNotExist clientToRemove)
-    else do
+  case Map.lookup clientToRemove currentClients of
+    Nothing -> return $ Failure (ClientDoesNotExist clientToRemove)
+    Just client -> do
+      bal <- readTVar (balance client)
+      _ <- withdrawWithError client bal
       modifyTVar (clients server) (Map.delete clientToRemove)
-      return $ Success ()
+      return $ Success client

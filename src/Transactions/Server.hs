@@ -4,7 +4,8 @@ import Control.Concurrent.STM
 import Data.Map
 import Transactions.Client
 
-newtype Server =
+data Server =
   Server
     { clients :: TVar (Map ClientName Client)
+    , admin :: Client
     }

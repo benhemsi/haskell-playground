@@ -3,6 +3,7 @@
 module Transactions.TransactionsIO where
 
 import Control.Concurrent.STM
+import Control.Monad
 import Data.Hashable
 import Data.List (intercalate)
 import qualified Data.Map as Map
@@ -29,9 +30,10 @@ port :: PortNumber
 port = 44444
 
 data StartAction
-  = SignUp
+  = AdminLogIn
+  | SignUp
   | LogIn
-  deriving (Show, Read, Enum, Bounded)
+  deriving (Show, Read, Enum)
 
 data ClientAction
   = Transfer
@@ -39,6 +41,7 @@ data ClientAction
   | Deposit
   | Withdraw
   | LogOut
+  | RequestRemoval
   deriving (Show, Read, Enum, Bounded)
 
 talk :: Handle -> Server -> IO ()
@@ -46,12 +49,14 @@ talk handle server = do
   hSetNewlineMode handle universalNewlineMode
   hSetBuffering handle LineBuffering
   client <- startAction handle server
-  clientAction server client
+  if name client == "admin"
+    then adminWatchMessages server
+    else clientAction server client
 
 startAction :: Handle -> Server -> IO Client
 startAction handle server = do
   let options :: [StartAction]
-      options = [minBound .. maxBound]
+      options = [SignUp ..]
   hPutStrLn handle $
     "Select one of the following: " ++ intercalate ", " (map show options)
   response <- hGetLine handle
@@ -65,6 +70,7 @@ startAction handle server = do
 runStartAction :: Handle -> Server -> StartAction -> IO Client
 runStartAction handle server action =
   case action of
+    AdminLogIn -> adminLogIn handle server
     SignUp -> addClient handle server
     LogIn -> logIn handle server
 
@@ -91,12 +97,16 @@ runClientAction server client action =
     Deposit -> deposit client
     Withdraw -> withdraw client
     LogOut -> logOut server client
+    RequestRemoval ->
+      atomically $
+      writeTQueue (messages $ admin server) (DeleteRequest $ name client)
 
 newServer :: IO Server
 newServer =
   atomically $ do
     emptyClients <- newTVar Map.empty
-    return $ Server emptyClients
+    adminClient <- buildClientSTM Nothing "admin" "password" 1000000
+    return $ Server emptyClients adminClient
 
 addClient :: Handle -> Server -> IO Client
 addClient handle server = do
@@ -132,6 +142,25 @@ addClient handle server = do
           hPutStrLn handle "Password must be 5 characters or more. Try again"
           enterPassword
         else return psw
+
+adminLogIn :: Handle -> Server -> IO Client
+adminLogIn handle server = do
+  hPutStrLn handle "Enter password:"
+  enterPassword
+  where
+    enterPassword = do
+      psw <- hGetLine handle
+      if hash psw == password (admin server)
+        then do
+          hPutStrLn handle "Successful login"
+          _ <-
+            atomically $ do
+              _ <- writeTVar (loggedIn $ admin server) True
+              putTMVar (clientHandle $ admin server) handle
+          return (admin server)
+        else do
+          printClientMessage (admin server) "Incorrect passord. Try again"
+          enterPassword
 
 logIn :: Handle -> Server -> IO Client
 logIn handle server = do
@@ -191,12 +220,18 @@ getClient handle server = do
       hPrint handle txnError
       getClient handle server
 
-removeClient :: Handle -> Server -> ClientName -> IO ()
-removeClient handle server newClient =
-  runSTM
-    handle
-    (removeClientSTM server newClient)
-    (\_ -> newClient ++ " successfully deleted")
+removeClient :: Server -> ClientName -> IO ()
+removeClient server newClient = do
+  maybeRemoval <- atomically $ removeClientSTM server newClient
+  case maybeRemoval of
+    Failure errorMessage ->
+      printClientMessage (admin server) (show errorMessage)
+    Success client -> do
+      printClientMessage
+        client
+        "Your account has been successfully deleted and your current balance has been withdrawn"
+      printClientMessage (admin server) $ name client ++ " has been deleted"
+      logOut server client
 
 -- payDebt :: Handle -> Server -> ClientName -> ClientName -> Int -> IO ()
 -- payDebt handle server startClient endClient amount = do
@@ -267,6 +302,18 @@ withdraw client = do
     handle
     (withdrawWithError client amount)
     (const $ "Successful withdraw of " ++ show amount)
+
+adminWatchMessages :: Server -> IO ()
+adminWatchMessages server = do
+  message <- atomically $ adminGetMessageSTM server
+  case message of
+    DeleteRequest clientName -> do
+      printClientMessage (admin server) $
+        "Delete request from: " ++ clientName ++ ". Enter y/n:"
+      response <- clientGetLine (admin server)
+      when (response == "y") $ removeClient server clientName
+      adminWatchMessages server
+    _ -> adminWatchMessages server
 
 sendMessage :: Client -> Message -> IO ()
 sendMessage client message = do
