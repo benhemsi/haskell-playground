@@ -1,4 +1,4 @@
-module Main where
+module Transactions where
 
 import Transactions.TransactionsIO
 
