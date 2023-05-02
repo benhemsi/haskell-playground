@@ -6,7 +6,7 @@ import Control.Monad
 import System.IO
 
 main :: IO ()
-main = forkTMVar
+main = deadlock
 
 put2 :: IO ()
 put2 = do
@@ -70,3 +70,31 @@ forkTMVar = do
     2000
     (do r <- atomically $ takeTMVar m
         putChar r)
+
+deadlock :: IO ()
+deadlock = do
+  m1 <- newMVar (0 :: Int)
+  m2 <- newMVar (0 :: Int)
+  txns <- newMVar (0 :: Int)
+  _ <-
+    forkIO $
+    replicateM_ 1000 $ do
+      a <- takeMVar m1
+      b <- takeMVar m2
+      putMVar m2 (a + 1)
+      -- putMVar m1 (a + 1)
+      modifyMVar_ txns (\x -> pure $ x + 1)
+  -- _ <-
+  --   forkIO $
+  replicateM_ 1000 $ do
+    a <- takeMVar m2
+    b <- takeMVar m1
+    putMVar m1 (a - 1)
+    -- putMVar m2 (a - 1)
+    modifyMVar_ txns (\x -> pure $ x + 1)
+  t <- takeMVar txns
+  a <- takeMVar m1
+  b <- takeMVar m2
+  print t
+  print a
+  print b
